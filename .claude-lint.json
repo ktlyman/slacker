@@ -1,0 +1,5 @@
+{
+  "thresholds": {
+    "contextBudgetLines": 200
+  }
+}
