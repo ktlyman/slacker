@@ -192,13 +192,16 @@ function migrate(db) {
     -- Stars (user's starred items)
     -----------------------------------------------------------------
     CREATE TABLE IF NOT EXISTS stars (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
       type          TEXT NOT NULL,   -- 'message', 'file', 'channel'
-      channel_id    TEXT,
-      message_ts    TEXT,
-      file_id       TEXT,
-      created_at    INTEGER,
-      PRIMARY KEY (type, COALESCE(channel_id,''), COALESCE(message_ts,''), COALESCE(file_id,''))
+      channel_id    TEXT DEFAULT '',
+      message_ts    TEXT DEFAULT '',
+      file_id       TEXT DEFAULT '',
+      created_at    INTEGER
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stars_unique
+      ON stars(type, channel_id, message_ts, file_id);
 
     -----------------------------------------------------------------
     -- Custom emoji
@@ -223,6 +226,25 @@ function migrate(db) {
       updated_at    TEXT DEFAULT (datetime('now'))
     );
   `);
+
+  // ── Additive migrations for existing databases ──────────────
+  // ALTER TABLE ... ADD COLUMN is safe to repeat — SQLite errors if the
+  // column already exists, so we catch and ignore each one.
+  const addColumns = [
+    ['users', 'title',        'TEXT DEFAULT \'\''],
+    ['users', 'email',        'TEXT DEFAULT \'\''],
+    ['users', 'timezone',     'TEXT DEFAULT \'\''],
+    ['users', 'status_text',  'TEXT DEFAULT \'\''],
+    ['users', 'status_emoji', 'TEXT DEFAULT \'\''],
+    ['users', 'avatar_url',   'TEXT DEFAULT \'\''],
+  ];
+  for (const [table, col, type] of addColumns) {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 }
 
 // ── Upsert helpers ──────────────────────────────────────────────
@@ -528,12 +550,12 @@ export function upsertStar(db, item) {
   db.prepare(`
     INSERT INTO stars (type, channel_id, message_ts, file_id, created_at)
     VALUES (@type, @channel_id, @message_ts, @file_id, @created_at)
-    ON CONFLICT DO NOTHING
+    ON CONFLICT(type, channel_id, message_ts, file_id) DO NOTHING
   `).run({
     type,
-    channel_id: item.channel ?? item.message?.channel ?? null,
-    message_ts: item.message?.ts ?? null,
-    file_id: item.file?.id ?? null,
+    channel_id: item.channel ?? item.message?.channel ?? '',
+    message_ts: item.message?.ts ?? '',
+    file_id: item.file?.id ?? '',
     created_at: item.date_create ?? null,
   });
 }
