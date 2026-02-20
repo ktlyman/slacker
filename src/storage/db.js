@@ -40,6 +40,12 @@ function migrate(db) {
       real_name     TEXT,
       display_name  TEXT,
       is_bot        INTEGER DEFAULT 0,
+      title         TEXT DEFAULT '',
+      email         TEXT DEFAULT '',
+      timezone      TEXT DEFAULT '',
+      status_text   TEXT DEFAULT '',
+      status_emoji  TEXT DEFAULT '',
+      avatar_url    TEXT DEFAULT '',
       updated_at    TEXT DEFAULT (datetime('now'))
     );
 
@@ -123,6 +129,99 @@ function migrate(db) {
       latest_ts     TEXT NOT NULL DEFAULT '0',
       updated_at    TEXT DEFAULT (datetime('now'))
     );
+
+    -----------------------------------------------------------------
+    -- Pins
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS pins (
+      channel_id    TEXT NOT NULL,
+      message_ts    TEXT NOT NULL,
+      pinned_by     TEXT,
+      pinned_at     TEXT,
+      PRIMARY KEY (channel_id, message_ts)
+    );
+
+    -----------------------------------------------------------------
+    -- Bookmarks
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS bookmarks (
+      id            TEXT PRIMARY KEY,
+      channel_id    TEXT NOT NULL,
+      title         TEXT,
+      type          TEXT,
+      link          TEXT,
+      emoji         TEXT DEFAULT '',
+      created_by    TEXT,
+      created_at    INTEGER,
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    -----------------------------------------------------------------
+    -- Files metadata (not the file contents)
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS files (
+      id            TEXT PRIMARY KEY,
+      name          TEXT,
+      title         TEXT,
+      mimetype      TEXT,
+      filetype      TEXT,
+      size          INTEGER DEFAULT 0,
+      user_id       TEXT,
+      url_private   TEXT,
+      permalink     TEXT,
+      channels      TEXT,          -- JSON array of channel IDs
+      created_at    INTEGER,
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    -----------------------------------------------------------------
+    -- User groups (@engineering, @oncall, etc.)
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS user_groups (
+      id            TEXT PRIMARY KEY,
+      name          TEXT,
+      handle        TEXT,
+      description   TEXT DEFAULT '',
+      user_ids      TEXT,          -- JSON array of user IDs
+      channel_ids   TEXT,          -- JSON array of default channel IDs
+      is_active     INTEGER DEFAULT 1,
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    -----------------------------------------------------------------
+    -- Stars (user's starred items)
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS stars (
+      type          TEXT NOT NULL,   -- 'message', 'file', 'channel'
+      channel_id    TEXT,
+      message_ts    TEXT,
+      file_id       TEXT,
+      created_at    INTEGER,
+      PRIMARY KEY (type, COALESCE(channel_id,''), COALESCE(message_ts,''), COALESCE(file_id,''))
+    );
+
+    -----------------------------------------------------------------
+    -- Custom emoji
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS emoji (
+      name          TEXT PRIMARY KEY,
+      url           TEXT,
+      is_alias      INTEGER DEFAULT 0,
+      alias_for     TEXT DEFAULT '',
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    -----------------------------------------------------------------
+    -- Team / workspace info
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS team (
+      id            TEXT PRIMARY KEY,
+      name          TEXT,
+      domain        TEXT,
+      url           TEXT,
+      icon_url      TEXT DEFAULT '',
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
   `);
 }
 
@@ -148,21 +247,38 @@ export function upsertChannel(db, ch) {
 }
 
 export function upsertUser(db, u) {
+  const p = u.profile ?? {};
   db.prepare(`
-    INSERT INTO users (id, name, real_name, display_name, is_bot, updated_at)
-    VALUES (@id, @name, @real_name, @display_name, @is_bot, datetime('now'))
+    INSERT INTO users (id, name, real_name, display_name, is_bot,
+                       title, email, timezone, status_text, status_emoji,
+                       avatar_url, updated_at)
+    VALUES (@id, @name, @real_name, @display_name, @is_bot,
+            @title, @email, @timezone, @status_text, @status_emoji,
+            @avatar_url, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       real_name = excluded.real_name,
       display_name = excluded.display_name,
       is_bot = excluded.is_bot,
+      title = excluded.title,
+      email = excluded.email,
+      timezone = excluded.timezone,
+      status_text = excluded.status_text,
+      status_emoji = excluded.status_emoji,
+      avatar_url = excluded.avatar_url,
       updated_at = datetime('now')
   `).run({
     id: u.id,
     name: u.name ?? '',
-    real_name: u.real_name ?? u.profile?.real_name ?? '',
-    display_name: u.profile?.display_name ?? '',
+    real_name: u.real_name ?? p.real_name ?? '',
+    display_name: p.display_name ?? '',
     is_bot: u.is_bot ? 1 : 0,
+    title: p.title ?? '',
+    email: p.email ?? '',
+    timezone: u.tz ?? '',
+    status_text: p.status_text ?? '',
+    status_emoji: p.status_emoji ?? '',
+    avatar_url: p.image_192 ?? p.image_72 ?? '',
   });
 }
 
@@ -314,6 +430,149 @@ export function getMessagesByUser(db, userId, { channelId, limit = 50 } = {}) {
   if (channelId) { sql += ` AND m.channel_id = @channelId`; params.channelId = channelId; }
   sql += ` ORDER BY m.ts DESC LIMIT @limit`;
   return db.prepare(sql).all(params);
+}
+
+// ── Upsert helpers for extended data ───────────────────────────
+
+export function upsertPin(db, channelId, item) {
+  const ts = item.message?.ts ?? item.created;
+  if (!ts) return;
+  db.prepare(`
+    INSERT INTO pins (channel_id, message_ts, pinned_by, pinned_at)
+    VALUES (@channel_id, @message_ts, @pinned_by, @pinned_at)
+    ON CONFLICT(channel_id, message_ts) DO UPDATE SET
+      pinned_by = excluded.pinned_by,
+      pinned_at = excluded.pinned_at
+  `).run({
+    channel_id: channelId,
+    message_ts: ts,
+    pinned_by: item.created_by ?? null,
+    pinned_at: item.created ? String(item.created) : null,
+  });
+}
+
+export function upsertBookmark(db, channelId, bm) {
+  db.prepare(`
+    INSERT INTO bookmarks (id, channel_id, title, type, link, emoji, created_by, created_at, updated_at)
+    VALUES (@id, @channel_id, @title, @type, @link, @emoji, @created_by, @created_at, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      title = excluded.title,
+      link = excluded.link,
+      emoji = excluded.emoji,
+      updated_at = datetime('now')
+  `).run({
+    id: bm.id,
+    channel_id: channelId,
+    title: bm.title ?? '',
+    type: bm.type ?? 'link',
+    link: bm.link ?? '',
+    emoji: bm.emoji ?? '',
+    created_by: bm.created_by ?? null,
+    created_at: bm.date_created ?? null,
+  });
+}
+
+export function upsertFile(db, f) {
+  db.prepare(`
+    INSERT INTO files (id, name, title, mimetype, filetype, size, user_id,
+                       url_private, permalink, channels, created_at, updated_at)
+    VALUES (@id, @name, @title, @mimetype, @filetype, @size, @user_id,
+            @url_private, @permalink, @channels, @created_at, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      title = excluded.title,
+      size = excluded.size,
+      permalink = excluded.permalink,
+      channels = excluded.channels,
+      updated_at = datetime('now')
+  `).run({
+    id: f.id,
+    name: f.name ?? '',
+    title: f.title ?? '',
+    mimetype: f.mimetype ?? '',
+    filetype: f.filetype ?? '',
+    size: f.size ?? 0,
+    user_id: f.user ?? null,
+    url_private: f.url_private ?? '',
+    permalink: f.permalink ?? '',
+    channels: JSON.stringify([...(f.channels ?? []), ...(f.groups ?? []), ...(f.ims ?? [])]),
+    created_at: f.created ?? null,
+  });
+}
+
+export function upsertUserGroup(db, ug) {
+  db.prepare(`
+    INSERT INTO user_groups (id, name, handle, description, user_ids, channel_ids, is_active, updated_at)
+    VALUES (@id, @name, @handle, @description, @user_ids, @channel_ids, @is_active, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      handle = excluded.handle,
+      description = excluded.description,
+      user_ids = excluded.user_ids,
+      channel_ids = excluded.channel_ids,
+      is_active = excluded.is_active,
+      updated_at = datetime('now')
+  `).run({
+    id: ug.id,
+    name: ug.name ?? '',
+    handle: ug.handle ?? '',
+    description: ug.description ?? '',
+    user_ids: JSON.stringify(ug.users ?? []),
+    channel_ids: JSON.stringify(ug.prefs?.channels ?? []),
+    is_active: ug.date_delete === 0 ? 1 : 0,
+  });
+}
+
+export function upsertStar(db, item) {
+  const type = item.type ?? 'message';
+  db.prepare(`
+    INSERT INTO stars (type, channel_id, message_ts, file_id, created_at)
+    VALUES (@type, @channel_id, @message_ts, @file_id, @created_at)
+    ON CONFLICT DO NOTHING
+  `).run({
+    type,
+    channel_id: item.channel ?? item.message?.channel ?? null,
+    message_ts: item.message?.ts ?? null,
+    file_id: item.file?.id ?? null,
+    created_at: item.date_create ?? null,
+  });
+}
+
+export function upsertEmoji(db, name, value) {
+  const isAlias = value.startsWith('alias:');
+  db.prepare(`
+    INSERT INTO emoji (name, url, is_alias, alias_for, updated_at)
+    VALUES (@name, @url, @is_alias, @alias_for, datetime('now'))
+    ON CONFLICT(name) DO UPDATE SET
+      url = excluded.url,
+      is_alias = excluded.is_alias,
+      alias_for = excluded.alias_for,
+      updated_at = datetime('now')
+  `).run({
+    name,
+    url: isAlias ? '' : value,
+    is_alias: isAlias ? 1 : 0,
+    alias_for: isAlias ? value.replace('alias:', '') : '',
+  });
+}
+
+export function upsertTeam(db, t) {
+  db.prepare(`
+    INSERT INTO team (id, name, domain, url, icon_url, updated_at)
+    VALUES (@id, @name, @domain, @url, @icon_url, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      domain = excluded.domain,
+      url = excluded.url,
+      icon_url = excluded.icon_url,
+      updated_at = datetime('now')
+  `).run({
+    id: t.id,
+    name: t.name ?? '',
+    domain: t.domain ?? '',
+    url: t.url ?? '',
+    icon_url: t.icon?.image_230 ?? t.icon?.image_132 ?? '',
+  });
 }
 
 // ── Poll cursor helpers ────────────────────────────────────────

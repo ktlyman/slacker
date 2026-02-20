@@ -64,8 +64,13 @@ Credentials MUST NOT be committed. Use a `.env` file locally (already in `.gitig
 ## Database
 
 SQLite with WAL mode and FTS5. Schema is auto-migrated on first `getDb()` call.
-Tables: `channels`, `users`, `messages`, `import_cursors`, `poll_cursors`, `messages_fts` (virtual).
+Tables: `channels`, `users`, `messages`, `import_cursors`, `poll_cursors`, `messages_fts` (virtual),
+`pins`, `bookmarks`, `files`, `user_groups`, `stars`, `emoji`, `team`.
 Triggers keep FTS in sync on INSERT/DELETE automatically.
+
+The importer pulls all available Slack data: messages, threads, user profiles (with title,
+email, timezone, status, avatar), pins, bookmarks, file metadata, user groups, starred items,
+custom emoji, and team info. Use `--include-dms` to also import DMs and group DMs.
 
 ## HTTP API
 
