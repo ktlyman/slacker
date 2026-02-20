@@ -67,6 +67,7 @@ async function parallelMap(items, concurrency, fn) {
  * @param {string[]} [opts.channels]
  * @param {number} [opts.concurrency] — parallel channel imports (default 3)
  * @param {boolean} [opts.includeDms] — include DMs and group DMs
+ * @param {boolean} [opts.joinPublic] — join unjoined public channels before importing
  * @param {Function} [opts.log]
  */
 export async function importHistory(opts = {}) {
@@ -165,15 +166,16 @@ async function importChannel(client, db, ch, opts) {
   let newestTs = oldest ?? '0';
   let pageCursor;
 
-  // In bot mode, join the channel first (bot needs to be a member to read
-  // history).  User and session tokens can only access channels the user is
-  // already in, so skip the join call for those modes.
-  if (opts.authMode !== 'user' && opts.authMode !== 'session') {
+  // Join the channel if needed. Bot mode always joins. User/session modes
+  // join only when --join-public is set and the channel is public.
+  const shouldJoin = opts.authMode === 'bot'
+    || (opts.joinPublic && !ch.is_private && !ch.is_member);
+  if (shouldJoin) {
     try {
       await throttle();
       await client.conversations.join({ channel: ch.id });
     } catch {
-      // Already a member, or can't join private channel — continue anyway
+      // Already a member, or can't join — continue anyway
     }
   }
 

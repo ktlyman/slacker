@@ -59,6 +59,7 @@ program
   .option('-d, --db <path>', 'path to SQLite database')
   .option('-c, --channels <names...>', 'specific channel names or IDs to import')
   .option('--include-dms', 'also import DMs and group DMs')
+  .option('--join-public', 'join unjoined public channels to import their history')
   .action(async (opts) => {
     const auth = resolveAuth();
     const client = createClient(auth);
@@ -70,6 +71,7 @@ program
       dbPath: opts.db,
       channels: opts.channels,
       includeDms: opts.includeDms,
+      joinPublic: opts.joinPublic,
     });
     closeDb();
   });
@@ -154,6 +156,7 @@ program
   .option('-p, --port <number>', 'API port (default 3141)', parseInt)
   .option('-c, --channels <names...>', 'specific channel names or IDs to import')
   .option('--include-dms', 'also import DMs and group DMs')
+  .option('--join-public', 'join unjoined public channels to import their history')
   .option('--poll-interval <ms>', 'polling interval in ms for user/session modes (default 30000)', parseInt)
   .action(async (opts) => {
     const auth = resolveAuth();
@@ -167,6 +170,7 @@ program
       dbPath: opts.db,
       channels: opts.channels,
       includeDms: opts.includeDms,
+      joinPublic: opts.joinPublic,
     });
 
     console.log('\nStep 2/3: Starting listener...');
