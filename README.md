@@ -7,26 +7,82 @@ local SQLite database with full-text search, and exposes a simple API that any
 AI agent can use to retrieve relevant Slack context — similar to querying a RAG
 database or Gemini with NotebookLM.
 
+## Authentication Modes
+
+Three modes are supported, auto-detected from environment variables. Set the
+variables for the mode you want and every command (`listen`, `import`, `all`,
+etc.) will use it automatically.
+
+### Bot mode (full-featured)
+
+Requires a Slack app installed to the workspace (see [Slack App Setup](#slack-app-setup)).
+Uses Socket Mode for real-time events — no public URL required.
+
+```
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_SIGNING_SECRET=...
+```
+
+### User token mode (no admin approval)
+
+Uses a standard OAuth user token. On most workspaces this can be authorized by
+any member without admin involvement. Real-time messages are captured via
+polling (every 30 s by default) instead of Socket Mode.
+
+```
+SLACK_USER_TOKEN=xoxp-...
+```
+
+The user token can only access channels the authorizing user is a member of.
+
+### Session token mode (no app needed)
+
+Extracts the session token and cookie from your browser or Slack desktop app.
+No Slack app creation required at all. Uses polling for real-time capture.
+
+```
+SLACK_COOKIE_TOKEN=xoxc-...
+SLACK_COOKIE_D=xoxd-...
+```
+
+> **Warning:** Session tokens expire when you log out or change your password,
+> and automated use may violate Slack's Terms of Service. Use this mode for
+> personal experimentation only.
+
+### Feature comparison
+
+| | Bot | User token | Session token |
+|---|---|---|---|
+| Admin approval needed | Usually yes | No (most workspaces) | No |
+| Real-time events | Socket Mode | Polling | Polling |
+| Channels accessible | All (can auto-join) | Joined only | Joined only |
+| Token stability | Permanent | Permanent | Expires |
+
 ## Architecture
 
 ```
 Slack workspace
   │
-  ├──▶ Listener (Socket Mode)  ──▶ SQLite (FTS5)
-  │      real-time messages           │
-  │                                   │
-  ├──▶ History Importer         ──▶   │  (incremental)
-  │      bulk channel history         │
-  │                                   ▼
-  │                              Agent Query API
-  │                              POST /ask   ← "What broke prod?"
-  │                              POST /search
-  │                              GET  /recent/:channel
-  │                              GET  /thread/:ch/:ts
-  └──────────────────────────────GET  /stats
+  ├──▶ Listener                ──▶ SQLite (FTS5)
+  │      Socket Mode (bot)           │
+  │      or polling (user/session)   │
+  │                                  │
+  ├──▶ History Importer        ──▶   │  (incremental)
+  │      bulk channel history        │
+  │                                  ▼
+  │                             Agent Query API
+  │                             POST /ask   ← "What broke prod?"
+  │                             POST /search
+  │                             GET  /recent/:channel
+  │                             GET  /thread/:ch/:ts
+  └─────────────────────────────GET  /stats
 ```
 
 ## Slack App Setup
+
+Only required for **bot mode**. Skip this section if using user or session
+tokens.
 
 1. Go to https://api.slack.com/apps and create a new app
 2. Enable **Socket Mode** (Settings → Socket Mode → toggle on)
@@ -57,7 +113,7 @@ Slack workspace
 ```bash
 cd slack-agent
 cp .env.example .env
-# Edit .env with your Slack credentials
+# Edit .env with your Slack credentials (see Authentication Modes above)
 npm install
 ```
 
@@ -83,6 +139,9 @@ node bin/cli.js listen
 
 # Start listener + query API together
 node bin/cli.js listen --with-api
+
+# Start listener with custom polling interval (user/session modes)
+node bin/cli.js listen --poll-interval 60000
 
 # Start only the query API server
 node bin/cli.js serve
@@ -182,7 +241,10 @@ curl http://localhost:3141/stats
 ## Using from code (as a library)
 
 ```javascript
-import { SlackAgent, importHistory, startListener, startServer } from './src/index.js';
+import {
+  SlackAgent, importHistory, startListener, startPoller,
+  startServer, resolveAuth, createClient,
+} from './src/index.js';
 
 // Direct programmatic queries (no HTTP server needed)
 const agent = new SlackAgent();
@@ -193,6 +255,16 @@ console.log(answer.hits);
 const recent = agent.recent('#ops', 20);
 const thread = agent.thread('#engineering', '1708300000.000100');
 const results = agent.search('deployment pipeline', { channel: 'ops' });
+
+// Start a listener in the appropriate mode
+const auth = resolveAuth();
+const client = createClient(auth);
+
+if (auth.mode === 'bot') {
+  await startListener({ onMessage: console.log });
+} else {
+  await startPoller({ client, onMessage: console.log });
+}
 ```
 
 ## Database
@@ -200,7 +272,7 @@ const results = agent.search('deployment pipeline', { channel: 'ops' });
 All data is stored in a single SQLite file (`slack-agent.db` by default).
 Uses FTS5 for full-text search with Porter stemming and Unicode support.
 
-Tables: `messages`, `channels`, `users`, `import_cursors`
+Tables: `messages`, `channels`, `users`, `import_cursors`, `poll_cursors`
 Virtual table: `messages_fts` (auto-synced via triggers)
 
 The database file can be backed up, copied, or shared as-is.
