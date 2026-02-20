@@ -24,10 +24,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npx github:LaymanAI/linter . --fail-under 80
+      - run: npx claude-md-lint@1 . --fail-under 80
       - name: Upload SARIF (PR only)
         if: always() && github.event_name == 'pull_request'
-        run: npx github:LaymanAI/linter . --sarif > results.sarif
+        run: npx claude-md-lint@1 . --sarif > results.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always() && github.event_name == 'pull_request'
         with:
