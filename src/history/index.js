@@ -149,12 +149,23 @@ export async function importHistory(opts = {}) {
 }
 
 /**
+ * Derive a display label for any channel type.
+ * DMs (im) have no name — use the other user's ID. Group DMs (mpim) have a name.
+ */
+function channelLabel(ch) {
+  if (ch.name) return `#${ch.name}`;
+  if (ch.user) return `DM:${ch.user}`;
+  return ch.id;
+}
+
+/**
  * Import a single channel's message history.
  */
 async function importChannel(client, db, ch, opts) {
   const { log, throttle } = opts;
+  const label = channelLabel(ch);
 
-  log(`Importing #${ch.name} (${ch.id})...`);
+  log(`Importing ${label} (${ch.id})...`);
 
   // Check cursor for incremental import
   const cursor = db.prepare(
@@ -215,19 +226,19 @@ async function importChannel(client, db, ch, opts) {
     } catch (err) {
       if (err.data?.error === 'ratelimited') {
         const wait = (err.data?.retryAfter ?? 10) * 1000;
-        log(`  Rate limited on #${ch.name} — pausing ${wait / 1000}s`);
+        log(`  Rate limited on ${label} — pausing ${wait / 1000}s`);
         await sleep(wait);
         continue;
       }
       if (err.data?.error === 'not_in_channel' || err.data?.error === 'channel_not_found') {
-        log(`  Skipping #${ch.name}: ${err.data.error}`);
+        log(`  Skipping ${label}: ${err.data.error}`);
         break;
       }
       if (err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.code === 'UND_ERR_CONNECT_TIMEOUT') {
-        log(`  Timeout on #${ch.name} (${err.code}) — skipping to next channel`);
+        log(`  Timeout on ${label} (${err.code}) — skipping to next channel`);
         break;
       }
-      log(`  Error on #${ch.name}: ${err.message} — skipping`);
+      log(`  Error on ${label}: ${err.message} — skipping`);
       break;
     }
   } while (pageCursor);
@@ -241,7 +252,7 @@ async function importChannel(client, db, ch, opts) {
       updated_at = datetime('now')
   `).run({ channel_id: ch.id, latest_ts: newestTs });
 
-  log(`  ${msgCount} messages imported from #${ch.name}`);
+  log(`  ${msgCount} messages imported from ${label}`);
 }
 
 /**
