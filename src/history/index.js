@@ -11,15 +11,22 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  *
  * Steps:
  *  1. Sync all users
- *  2. Sync all channels the bot can see
+ *  2. Sync all channels the bot/user can see
  *  3. For each channel (or a specified subset), page through message
  *     history and store every message + thread reply.
  *
  * Supports incremental imports: tracks the latest timestamp per channel
  * so subsequent runs only fetch new messages.
+ *
+ * @param {object} opts
+ * @param {import('@slack/web-api').WebClient} [opts.client] — pre-configured WebClient (falls back to SLACK_BOT_TOKEN)
+ * @param {string} [opts.authMode] — 'bot', 'user', or 'session'
+ * @param {string} [opts.dbPath]
+ * @param {string[]} [opts.channels]
+ * @param {Function} [opts.log]
  */
 export async function importHistory(opts = {}) {
-  const client = new WebClient(process.env.SLACK_BOT_TOKEN);
+  const client = opts.client ?? new WebClient(process.env.SLACK_BOT_TOKEN);
   const db = getDb(opts.dbPath);
 
   const log = opts.log ?? console.log;
@@ -82,11 +89,15 @@ export async function importHistory(opts = {}) {
     let newestTs = oldest ?? '0';
     let pageCursor;
 
-    // Join the channel first (bot needs to be a member to read history)
-    try {
-      await client.conversations.join({ channel: ch.id });
-    } catch {
-      // Already a member, or can't join private channel — continue anyway
+    // In bot mode, join the channel first (bot needs to be a member to read
+    // history).  User and session tokens can only access channels the user is
+    // already in, so skip the join call for those modes.
+    if (opts.authMode !== 'user' && opts.authMode !== 'session') {
+      try {
+        await client.conversations.join({ channel: ch.id });
+      } catch {
+        // Already a member, or can't join private channel — continue anyway
+      }
     }
 
     // Page through history

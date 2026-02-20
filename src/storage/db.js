@@ -114,6 +114,15 @@ function migrate(db) {
       latest_ts     TEXT,
       updated_at    TEXT DEFAULT (datetime('now'))
     );
+
+    -----------------------------------------------------------------
+    -- Polling cursor tracking (separate from import cursors)
+    -----------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS poll_cursors (
+      channel_id    TEXT PRIMARY KEY,
+      latest_ts     TEXT NOT NULL DEFAULT '0',
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
   `);
 }
 
@@ -305,6 +314,37 @@ export function getMessagesByUser(db, userId, { channelId, limit = 50 } = {}) {
   if (channelId) { sql += ` AND m.channel_id = @channelId`; params.channelId = channelId; }
   sql += ` ORDER BY m.ts DESC LIMIT @limit`;
   return db.prepare(sql).all(params);
+}
+
+// ── Poll cursor helpers ────────────────────────────────────────
+
+/**
+ * Get the latest message timestamp seen by the poller for a channel.
+ * Returns '0' if no cursor exists (meaning: no prior polling).
+ */
+export function getPollCursor(db, channelId) {
+  const row = db.prepare(
+    'SELECT latest_ts FROM poll_cursors WHERE channel_id = ?'
+  ).get(channelId);
+  return row?.latest_ts ?? '0';
+}
+
+/**
+ * Update the polling cursor for a channel to a new latest timestamp.
+ * Only advances forward — never moves the cursor backward.
+ */
+export function setPollCursor(db, channelId, latestTs) {
+  db.prepare(`
+    INSERT INTO poll_cursors (channel_id, latest_ts, updated_at)
+    VALUES (@channel_id, @latest_ts, datetime('now'))
+    ON CONFLICT(channel_id) DO UPDATE SET
+      latest_ts = CASE
+        WHEN excluded.latest_ts > poll_cursors.latest_ts
+        THEN excluded.latest_ts
+        ELSE poll_cursors.latest_ts
+      END,
+      updated_at = datetime('now')
+  `).run({ channel_id: channelId, latest_ts: latestTs });
 }
 
 export function closeDb() {

@@ -3,10 +3,13 @@
 import 'dotenv/config';
 import { Command } from 'commander';
 import { startListener } from '../src/listener/index.js';
+import { startPoller } from '../src/listener/poller.js';
 import { importHistory } from '../src/history/index.js';
 import { SlackAgent } from '../src/agent/query.js';
 import { startServer } from '../src/agent/server.js';
 import { getDb, closeDb } from '../src/storage/db.js';
+import { resolveAuth } from '../src/auth/resolve.js';
+import { createClient } from '../src/auth/client.js';
 
 const program = new Command();
 
@@ -18,15 +21,32 @@ program
 // ── listen ────────────────────────────────────────────────────
 program
   .command('listen')
-  .description('Start the real-time Slack message listener (Socket Mode)')
+  .description('Start the real-time Slack message listener')
   .option('-d, --db <path>', 'path to SQLite database')
   .option('--with-api', 'also start the agent query HTTP API')
   .option('-p, --port <number>', 'API port (default 3141)', parseInt)
+  .option('--poll-interval <ms>', 'polling interval in ms for user/session modes (default 30000)', parseInt)
   .action(async (opts) => {
-    await startListener({ dbPath: opts.db, onMessage: (m) => {
+    const auth = resolveAuth();
+    console.log(`Auth mode: ${auth.mode}`);
+
+    const onMessage = (m) => {
       const tag = m.type === 'edited' ? '(edited)' : '';
       console.log(`[${m.channelId}] ${m.user}: ${m.text} ${tag}`);
-    }});
+    };
+
+    if (auth.mode === 'bot') {
+      await startListener({ dbPath: opts.db, onMessage });
+    } else {
+      const client = createClient(auth);
+      await startPoller({
+        client,
+        dbPath: opts.db,
+        pollInterval: opts.pollInterval,
+        onMessage,
+      });
+    }
+
     if (opts.withApi) {
       await startServer({ dbPath: opts.db, port: opts.port });
     }
@@ -39,7 +59,16 @@ program
   .option('-d, --db <path>', 'path to SQLite database')
   .option('-c, --channels <names...>', 'specific channel names or IDs to import')
   .action(async (opts) => {
-    await importHistory({ dbPath: opts.db, channels: opts.channels });
+    const auth = resolveAuth();
+    const client = createClient(auth);
+    console.log(`Auth mode: ${auth.mode}`);
+
+    await importHistory({
+      client,
+      authMode: auth.mode,
+      dbPath: opts.db,
+      channels: opts.channels,
+    });
     closeDb();
   });
 
@@ -122,14 +151,35 @@ program
   .option('-d, --db <path>', 'path to SQLite database')
   .option('-p, --port <number>', 'API port (default 3141)', parseInt)
   .option('-c, --channels <names...>', 'specific channel names or IDs to import')
+  .option('--poll-interval <ms>', 'polling interval in ms for user/session modes (default 30000)', parseInt)
   .action(async (opts) => {
+    const auth = resolveAuth();
+    const client = createClient(auth);
+    console.log(`Auth mode: ${auth.mode}`);
+
     console.log('Step 1/3: Importing history...');
-    await importHistory({ dbPath: opts.db, channels: opts.channels });
+    await importHistory({
+      client,
+      authMode: auth.mode,
+      dbPath: opts.db,
+      channels: opts.channels,
+    });
 
     console.log('\nStep 2/3: Starting listener...');
-    await startListener({ dbPath: opts.db, onMessage: (m) => {
+    const onMessage = (m) => {
       console.log(`[live] #${m.channelId} ${m.user}: ${m.text}`);
-    }});
+    };
+
+    if (auth.mode === 'bot') {
+      await startListener({ dbPath: opts.db, onMessage });
+    } else {
+      await startPoller({
+        client,
+        dbPath: opts.db,
+        pollInterval: opts.pollInterval,
+        onMessage,
+      });
+    }
 
     console.log('\nStep 3/3: Starting query API...');
     await startServer({ dbPath: opts.db, port: opts.port });

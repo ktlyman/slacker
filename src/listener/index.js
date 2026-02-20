@@ -15,6 +15,13 @@ import { getDb, upsertMessage, upsertChannel, upsertUser } from '../storage/db.j
  * agent query layer always has fresh data.
  */
 export async function startListener(opts = {}) {
+  if (!process.env.SLACK_BOT_TOKEN || !process.env.SLACK_APP_TOKEN) {
+    throw new Error(
+      'startListener requires bot mode credentials (SLACK_BOT_TOKEN + SLACK_APP_TOKEN). ' +
+      'For user token or session token modes, use startPoller instead.'
+    );
+  }
+
   const db = getDb(opts.dbPath);
 
   const app = new App({
