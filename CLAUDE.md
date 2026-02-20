@@ -11,16 +11,15 @@ user token, and session token.
 ## Commands
 
 - `npm start` — run main entry point
-- `node bin/cli.js listen` — start Slack listener (Socket Mode or polling)
-- `node bin/cli.js import` — bulk-import historical messages
-- `node bin/cli.js serve` — start HTTP query API on port 3141
-- `node bin/cli.js all` — import + listen + serve in sequence
+- `node bin/cli.js serve` — import history, start listener, and serve query API (all-in-one)
+- `node bin/cli.js import` — bulk-import historical messages only
+- `node bin/cli.js listen` — start Slack listener only (Socket Mode or polling)
 - `npx github:LaymanAI/linter .` — lint this CLAUDE.md file
 
 ## Architecture
 
 ```
-bin/cli.js              CLI entry point (Commander.js, 7 subcommands)
+bin/cli.js              CLI entry point (Commander.js, 6 subcommands)
 src/index.js            Library re-exports
 src/auth/resolve.js     Detect auth mode from env vars (bot/user/session)
 src/auth/client.js      Create WebClient for any auth mode

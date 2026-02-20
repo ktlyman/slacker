@@ -76,13 +76,53 @@ program
     closeDb();
   });
 
-// ── serve ─────────────────────────────────────────────────────
+// ── serve (all-in-one: import → listen → API) ────────────────
 program
   .command('serve')
-  .description('Start the agent query HTTP API (no listener)')
+  .description('Import history, start listener, and serve the query API')
   .option('-d, --db <path>', 'path to SQLite database')
-  .option('-p, --port <number>', 'port (default 3141)', parseInt)
+  .option('-p, --port <number>', 'API port (default 3141)', parseInt)
+  .option('-c, --channels <names...>', 'specific channel names or IDs to import')
+  .option('--include-dms', 'also import DMs and group DMs')
+  .option('--join-public', 'join unjoined public channels to import their history')
+  .option('--poll-interval <ms>', 'polling interval in ms for user/session modes (default 30000)', parseInt)
+  .option('--skip-import', 'skip the initial history import and go straight to listen + API')
   .action(async (opts) => {
+    const auth = resolveAuth();
+    const client = createClient(auth);
+    console.log(`Auth mode: ${auth.mode}`);
+
+    if (!opts.skipImport) {
+      console.log('Step 1/3: Importing history...');
+      await importHistory({
+        client,
+        authMode: auth.mode,
+        dbPath: opts.db,
+        channels: opts.channels,
+        includeDms: opts.includeDms,
+        joinPublic: opts.joinPublic,
+      });
+    } else {
+      console.log('Step 1/3: Skipping import (--skip-import)');
+    }
+
+    console.log('\nStep 2/3: Starting listener...');
+    const onMessage = (m) => {
+      console.log(`[live] #${m.channelId} ${m.user}: ${m.text}`);
+    };
+
+    if (auth.mode === 'bot') {
+      await startListener({ dbPath: opts.db, onMessage });
+    } else {
+      await startPoller({
+        client,
+        dbPath: opts.db,
+        pollInterval: opts.pollInterval,
+        onMessage,
+      });
+    }
+
+    console.log('\nStep 3/3: Starting query API...');
     await startServer({ dbPath: opts.db, port: opts.port });
   });
 
@@ -146,51 +186,6 @@ program
     }
     console.log(`\n${channels.length} channels total`);
     closeDb();
-  });
-
-// ── all (listen + import + serve) ────────────────────────────
-program
-  .command('all')
-  .description('Import history, start listener, and serve the query API')
-  .option('-d, --db <path>', 'path to SQLite database')
-  .option('-p, --port <number>', 'API port (default 3141)', parseInt)
-  .option('-c, --channels <names...>', 'specific channel names or IDs to import')
-  .option('--include-dms', 'also import DMs and group DMs')
-  .option('--join-public', 'join unjoined public channels to import their history')
-  .option('--poll-interval <ms>', 'polling interval in ms for user/session modes (default 30000)', parseInt)
-  .action(async (opts) => {
-    const auth = resolveAuth();
-    const client = createClient(auth);
-    console.log(`Auth mode: ${auth.mode}`);
-
-    console.log('Step 1/3: Importing history...');
-    await importHistory({
-      client,
-      authMode: auth.mode,
-      dbPath: opts.db,
-      channels: opts.channels,
-      includeDms: opts.includeDms,
-      joinPublic: opts.joinPublic,
-    });
-
-    console.log('\nStep 2/3: Starting listener...');
-    const onMessage = (m) => {
-      console.log(`[live] #${m.channelId} ${m.user}: ${m.text}`);
-    };
-
-    if (auth.mode === 'bot') {
-      await startListener({ dbPath: opts.db, onMessage });
-    } else {
-      await startPoller({
-        client,
-        dbPath: opts.db,
-        pollInterval: opts.pollInterval,
-        onMessage,
-      });
-    }
-
-    console.log('\nStep 3/3: Starting query API...');
-    await startServer({ dbPath: opts.db, port: opts.port });
   });
 
 program.parse();
