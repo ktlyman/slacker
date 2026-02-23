@@ -3,6 +3,7 @@ import {
   getDb, upsertChannel, upsertUser, upsertMessage,
   upsertPin, upsertBookmark, upsertFile,
   upsertUserGroup, upsertStar, upsertEmoji, upsertTeam,
+  isMetadataFresh, touchMetadataCursor,
 } from '../storage/db.js';
 
 const RATE_LIMIT_PAUSE_MS = 1200;      // Slack tier-3 rate limit ≈ 50 req/min
@@ -124,11 +125,29 @@ export async function importHistory(opts = {}) {
   }
 
   // ── 5. Import messages per channel (parallel) ──────────────
-  log(`Importing ${targetChannels.length} channels (concurrency: ${concurrency})...`);
+  // Split into channels that need a full import vs incremental check.
+  // Channels with an existing cursor only need a quick check for new messages.
+  const hasCursor = new Set(
+    db.prepare('SELECT channel_id FROM import_cursors').all().map(r => r.channel_id)
+  );
+  const freshChannels = targetChannels.filter(ch => !hasCursor.has(ch.id));
+  const incrementalChannels = targetChannels.filter(ch => hasCursor.has(ch.id));
 
-  await parallelMap(targetChannels, concurrency, async (ch) => {
-    await importChannel(client, db, ch, { ...opts, log, throttle });
-  });
+  if (freshChannels.length) {
+    log(`Importing ${freshChannels.length} new channels (concurrency: ${concurrency})...`);
+    await parallelMap(freshChannels, concurrency, async (ch) => {
+      await importChannel(client, db, ch, { ...opts, log, throttle });
+    });
+  }
+
+  if (incrementalChannels.length) {
+    // Incremental channels: higher concurrency since most return 0 messages
+    const incrConcurrency = Math.min(incrementalChannels.length, concurrency * 3);
+    log(`Checking ${incrementalChannels.length} channels for new messages (concurrency: ${incrConcurrency})...`);
+    await parallelMap(incrementalChannels, incrConcurrency, async (ch) => {
+      await importChannel(client, db, ch, { ...opts, log, throttle });
+    });
+  }
 
   // ── 6. Import workspace-level data ─────────────────────────
   log('Importing workspace data (emoji, user groups, files, stars)...');
@@ -138,8 +157,10 @@ export async function importHistory(opts = {}) {
   await importStars(client, db, log, throttle);
 
   // ── 7. Import per-channel pins & bookmarks ─────────────────
-  log(`Importing pins & bookmarks for ${targetChannels.length} channels...`);
-  await parallelMap(targetChannels, concurrency, async (ch) => {
+  // Uses higher concurrency since most channels will be skipped (freshness check)
+  const metaConcurrency = Math.min(targetChannels.length, concurrency * 3);
+  log(`Syncing pins & bookmarks for ${targetChannels.length} channels...`);
+  await parallelMap(targetChannels, metaConcurrency, async (ch) => {
     await importPins(client, db, ch.id, log, throttle);
     await importBookmarks(client, db, ch.id, log, throttle);
   });
@@ -165,13 +186,12 @@ async function importChannel(client, db, ch, opts) {
   const { log, throttle } = opts;
   const label = channelLabel(ch);
 
-  log(`Importing ${label} (${ch.id})...`);
-
   // Check cursor for incremental import
   const cursor = db.prepare(
     'SELECT latest_ts FROM import_cursors WHERE channel_id = ?'
   ).get(ch.id);
   const oldest = cursor?.latest_ts ?? undefined;
+  const isIncremental = !!cursor;
 
   let msgCount = 0;
   let newestTs = oldest ?? '0';
@@ -252,7 +272,10 @@ async function importChannel(client, db, ch, opts) {
       updated_at = datetime('now')
   `).run({ channel_id: ch.id, latest_ts: newestTs });
 
-  log(`  ${msgCount} messages imported from ${label}`);
+  // Only log if we actually imported something (skip noise for 0-message incremental checks)
+  if (msgCount > 0 || !isIncremental) {
+    log(`  ${msgCount} messages imported from ${label}`);
+  }
 }
 
 /**
@@ -398,19 +421,27 @@ async function importStars(client, db, log, throttle) {
  * Import pins for a single channel.
  */
 async function importPins(client, db, channelId, log, throttle) {
+  // Skip if recently synced (within 60 min)
+  if (isMetadataFresh(db, channelId, 'pins')) return;
+
   try {
     await throttle();
     const result = await client.pins.list({ channel: channelId });
     const items = result.items ?? [];
-    if (items.length === 0) return;
-    db.transaction(() => {
-      for (const item of items) {
-        upsertPin(db, channelId, item);
-      }
-    })();
+    if (items.length > 0) {
+      db.transaction(() => {
+        for (const item of items) {
+          upsertPin(db, channelId, item);
+        }
+      })();
+    }
+    touchMetadataCursor(db, channelId, 'pins');
   } catch (err) {
     // DMs and some channels don't support pins — skip silently for common errors
-    if (err.data?.error === 'channel_not_found' || err.data?.error === 'not_in_channel') return;
+    if (err.data?.error === 'channel_not_found' || err.data?.error === 'not_in_channel') {
+      touchMetadataCursor(db, channelId, 'pins'); // Don't retry unsupported channels
+      return;
+    }
     log(`  Pins for ${channelId}: ${err.message} — skipping`);
   }
 }
@@ -419,20 +450,28 @@ async function importPins(client, db, channelId, log, throttle) {
  * Import bookmarks for a single channel.
  */
 async function importBookmarks(client, db, channelId, log, throttle) {
+  // Skip if recently synced (within 60 min)
+  if (isMetadataFresh(db, channelId, 'bookmarks')) return;
+
   try {
     await throttle();
     const result = await client.bookmarks.list({ channel_id: channelId });
     const bookmarks = result.bookmarks ?? [];
-    if (bookmarks.length === 0) return;
-    db.transaction(() => {
-      for (const bm of bookmarks) {
-        upsertBookmark(db, channelId, bm);
-      }
-    })();
+    if (bookmarks.length > 0) {
+      db.transaction(() => {
+        for (const bm of bookmarks) {
+          upsertBookmark(db, channelId, bm);
+        }
+      })();
+    }
+    touchMetadataCursor(db, channelId, 'bookmarks');
   } catch (err) {
     // Bookmarks API may not be available for all channel types
     if (err.data?.error === 'channel_not_found' || err.data?.error === 'not_in_channel'
-      || err.data?.error === 'not_allowed_for_channel_type') return;
+      || err.data?.error === 'not_allowed_for_channel_type') {
+      touchMetadataCursor(db, channelId, 'bookmarks'); // Don't retry unsupported channels
+      return;
+    }
     log(`  Bookmarks for ${channelId}: ${err.message} — skipping`);
   }
 }

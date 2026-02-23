@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slacker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><g transform='rotate(-8 32 32)'><rect x='17' y='10' width='8' height='44' rx='4' fill='%2336C5F0'/><rect x='39' y='10' width='8' height='44' rx='4' fill='%23E01E5A'/><rect x='10' y='17' width='44' height='8' rx='4' fill='%232EB67D'/><rect x='10' y='39' width='44' height='8' rx='4' fill='%23ECB22E'/></g></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── Sidebar ──────────────────────────────────────── -->
+    <aside id="sidebar">
+      <div id="team-header">
+        <img id="team-icon" src="" alt="">
+        <span id="team-name">Slacker</span>
+      </div>
+
+      <div id="search-box">
+        <input type="text" id="search-input" placeholder="Search messages..." autocomplete="off">
+      </div>
+
+      <nav id="channel-list">
+        <h3>Channels</h3>
+        <ul id="channels"></ul>
+      </nav>
+
+      <nav id="dm-list">
+        <h3>Direct Messages</h3>
+        <ul id="dms"></ul>
+      </nav>
+    </aside>
+
+    <!-- ── Main message area ────────────────────────────── -->
+    <main id="main">
+      <header id="channel-header">
+        <div id="channel-header-left">
+          <h2 id="channel-title">Select a channel</h2>
+          <span id="channel-topic"></span>
+        </div>
+        <div id="channel-header-right">
+          <button id="pins-btn" class="header-btn" title="Pins">&#128204;</button>
+          <button id="bookmarks-btn" class="header-btn" title="Bookmarks">&#128278;</button>
+          <span id="channel-stats"></span>
+        </div>
+      </header>
+
+      <div id="messages" class="message-list"></div>
+    </main>
+
+    <!-- ── Thread panel (hidden by default) ─────────────── -->
+    <aside id="thread-panel" class="hidden">
+      <header id="thread-header">
+        <h3>Thread</h3>
+        <button id="thread-close" title="Close">&times;</button>
+      </header>
+      <div id="thread-messages" class="message-list"></div>
+    </aside>
+
+    <!-- ── Search overlay ───────────────────────────────── -->
+    <div id="search-overlay" class="hidden">
+      <header id="search-header">
+        <h3>Search Results</h3>
+        <button id="search-close" title="Close">&times;</button>
+      </header>
+      <div id="search-results" class="message-list"></div>
+    </div>
+
+    <!-- ── Pins overlay ─────────────────────────────────── -->
+    <div id="pins-overlay" class="hidden">
+      <header id="pins-header">
+        <h3>Pinned Messages</h3>
+        <button id="pins-close" title="Close">&times;</button>
+      </header>
+      <div id="pins-content"></div>
+    </div>
+
+    <!-- ── Bookmarks overlay ────────────────────────────── -->
+    <div id="bookmarks-overlay" class="hidden">
+      <header id="bookmarks-header">
+        <h3>Bookmarks</h3>
+        <button id="bookmarks-close" title="Close">&times;</button>
+      </header>
+      <div id="bookmarks-content"></div>
+    </div>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

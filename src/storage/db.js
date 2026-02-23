@@ -1,15 +1,38 @@
 import Database from 'better-sqlite3';
+import os from 'node:os';
 import path from 'node:path';
 
 let _db = null;
+let _dbPath = null;
+
+/**
+ * Expand leading ~ to the user's home directory (shell doesn't do this for env vars).
+ */
+function expandHome(p) {
+  if (p && p.startsWith('~')) {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+}
 
 /**
  * Open (or return the cached) SQLite database and ensure all tables exist.
+ * Path resolution priority: explicit dbPath arg > DATABASE_PATH env > ./slack-agent.db
  */
 export function getDb(dbPath) {
-  if (_db) return _db;
+  const raw = dbPath || process.env.DATABASE_PATH || './slack-agent.db';
+  const resolved = path.resolve(expandHome(raw));
 
-  const resolved = path.resolve(dbPath || process.env.DATABASE_PATH || './slack-agent.db');
+  if (_db) {
+    // Warn if called with a different path than the one already open
+    if (_dbPath !== resolved) {
+      console.warn(`[db] Warning: getDb() called with "${resolved}" but already open at "${_dbPath}". Using existing connection.`);
+    }
+    return _db;
+  }
+
+  _dbPath = resolved;
+  console.error(`[db] Opening database: ${resolved}`);
   _db = new Database(resolved);
 
   // Performance pragmas
@@ -18,6 +41,13 @@ export function getDb(dbPath) {
 
   migrate(_db);
   return _db;
+}
+
+/**
+ * Return the path of the currently open database (or null).
+ */
+export function getDbPath() {
+  return _dbPath;
 }
 
 function migrate(db) {
@@ -130,6 +160,14 @@ function migrate(db) {
       updated_at    TEXT DEFAULT (datetime('now'))
     );
 
+    -- Tracks when per-channel metadata (pins, bookmarks) was last synced
+    CREATE TABLE IF NOT EXISTS metadata_cursors (
+      channel_id    TEXT NOT NULL,
+      data_type     TEXT NOT NULL,   -- 'pins' or 'bookmarks'
+      updated_at    TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (channel_id, data_type)
+    );
+
     -----------------------------------------------------------------
     -- Pins
     -----------------------------------------------------------------
@@ -237,6 +275,12 @@ function migrate(db) {
     ['users', 'status_text',  'TEXT DEFAULT \'\''],
     ['users', 'status_emoji', 'TEXT DEFAULT \'\''],
     ['users', 'avatar_url',   'TEXT DEFAULT \'\''],
+    // Message enrichment columns
+    ['messages', 'subtype',          'TEXT'],
+    ['messages', 'edited_at',        'TEXT'],
+    ['messages', 'blocks',           'TEXT'],
+    ['messages', 'bot_id',           'TEXT'],
+    ['messages', 'bot_profile_name', 'TEXT'],
   ];
   for (const [table, col, type] of addColumns) {
     try {
@@ -307,16 +351,23 @@ export function upsertUser(db, u) {
 export function upsertMessage(db, msg, channelId) {
   db.prepare(`
     INSERT INTO messages (ts, channel_id, user_id, text, thread_ts, reply_count,
-                          reactions, attachments, permalink, raw)
+                          reactions, attachments, permalink, raw,
+                          subtype, edited_at, blocks, bot_id, bot_profile_name)
     VALUES (@ts, @channel_id, @user_id, @text, @thread_ts, @reply_count,
-            @reactions, @attachments, @permalink, @raw)
+            @reactions, @attachments, @permalink, @raw,
+            @subtype, @edited_at, @blocks, @bot_id, @bot_profile_name)
     ON CONFLICT(channel_id, ts) DO UPDATE SET
-      text        = excluded.text,
-      reply_count = excluded.reply_count,
-      reactions   = excluded.reactions,
-      attachments = excluded.attachments,
-      permalink   = excluded.permalink,
-      raw         = excluded.raw
+      text             = excluded.text,
+      reply_count      = excluded.reply_count,
+      reactions        = excluded.reactions,
+      attachments      = excluded.attachments,
+      permalink        = excluded.permalink,
+      raw              = excluded.raw,
+      subtype          = excluded.subtype,
+      edited_at        = excluded.edited_at,
+      blocks           = excluded.blocks,
+      bot_id           = excluded.bot_id,
+      bot_profile_name = excluded.bot_profile_name
   `).run({
     ts: msg.ts,
     channel_id: channelId,
@@ -328,6 +379,11 @@ export function upsertMessage(db, msg, channelId) {
     attachments: msg.attachments ? JSON.stringify(msg.attachments) : null,
     permalink: msg.permalink ?? null,
     raw: JSON.stringify(msg),
+    subtype: msg.subtype ?? null,
+    edited_at: msg.edited?.ts ?? null,
+    blocks: msg.blocks ? JSON.stringify(msg.blocks) : null,
+    bot_id: msg.bot_id ?? null,
+    bot_profile_name: msg.bot_profile?.name ?? null,
   });
 }
 
@@ -349,10 +405,13 @@ export function searchMessages(db, query, { limit = 25, channelId, userId, befor
   return db.prepare(`
     SELECT m.ts, m.channel_id, m.user_id, m.text, m.thread_ts,
            m.reply_count, m.reactions, m.permalink,
+           m.subtype, m.edited_at, m.bot_id, m.bot_profile_name,
            u.display_name AS user_display_name,
            u.real_name    AS user_real_name,
            u.name         AS user_name,
            c.name         AS channel_name,
+           c.topic        AS channel_topic,
+           c.purpose      AS channel_purpose,
            rank
     FROM messages_fts
     JOIN messages m ON m.rowid = messages_fts.rowid
@@ -370,6 +429,7 @@ export function searchMessages(db, query, { limit = 25, channelId, userId, befor
 export function getContext(db, channelId, ts, windowSize = 10) {
   return db.prepare(`
     SELECT m.ts, m.user_id, m.text, m.thread_ts,
+           m.subtype, m.edited_at,
            u.display_name AS user_display_name,
            u.name AS user_name,
            c.name AS channel_name
@@ -391,6 +451,7 @@ export function getContext(db, channelId, ts, windowSize = 10) {
 export function getThread(db, channelId, threadTs) {
   return db.prepare(`
     SELECT m.ts, m.user_id, m.text, m.thread_ts,
+           m.subtype, m.edited_at,
            u.display_name AS user_display_name,
            u.name AS user_name
     FROM messages m
@@ -407,6 +468,7 @@ export function getThread(db, channelId, threadTs) {
 export function getRecent(db, channelId, limit = 50) {
   return db.prepare(`
     SELECT m.ts, m.user_id, m.text, m.thread_ts, m.reply_count,
+           m.subtype, m.edited_at,
            u.display_name AS user_display_name,
            u.name AS user_name
     FROM messages m
@@ -441,6 +503,7 @@ export function listChannels(db) {
 export function getMessagesByUser(db, userId, { channelId, limit = 50 } = {}) {
   let sql = `
     SELECT m.ts, m.channel_id, m.text, m.thread_ts,
+           m.subtype, m.edited_at, m.bot_id, m.bot_profile_name,
            c.name AS channel_name,
            u.display_name AS user_display_name
     FROM messages m
@@ -629,5 +692,340 @@ export function setPollCursor(db, channelId, latestTs) {
 }
 
 export function closeDb() {
-  if (_db) { _db.close(); _db = null; }
+  if (_db) { _db.close(); _db = null; _dbPath = null; }
+}
+
+/**
+ * Check if a metadata sync (pins/bookmarks) for a channel is still fresh.
+ * Returns true if it was synced within `maxAgeMinutes` ago.
+ */
+export function isMetadataFresh(db, channelId, dataType, maxAgeMinutes = 60) {
+  const row = db.prepare(`
+    SELECT updated_at FROM metadata_cursors
+    WHERE channel_id = @channelId AND data_type = @dataType
+      AND updated_at > datetime('now', @age)
+  `).get({ channelId, dataType, age: `-${maxAgeMinutes} minutes` });
+  return !!row;
+}
+
+/**
+ * Mark a metadata type (pins/bookmarks) as freshly synced for a channel.
+ */
+export function touchMetadataCursor(db, channelId, dataType) {
+  db.prepare(`
+    INSERT INTO metadata_cursors (channel_id, data_type, updated_at)
+    VALUES (@channelId, @dataType, datetime('now'))
+    ON CONFLICT(channel_id, data_type) DO UPDATE SET updated_at = datetime('now')
+  `).run({ channelId, dataType });
+}
+
+// ── Rich query helpers (for frontend) ───────────────────────────
+
+/**
+ * Get recent messages with full user metadata (avatars, reactions).
+ * Filters out thread replies — only top-level and parent messages shown.
+ * Includes thread preview data (last reply ts, reply participant info).
+ */
+export function getRecentRich(db, channelId, limit = 50) {
+  return db.prepare(`
+    SELECT m.ts, m.channel_id, m.user_id, m.text, m.thread_ts, m.reply_count,
+           m.reactions, m.attachments,
+           m.subtype, m.edited_at, m.blocks, m.bot_id, m.bot_profile_name,
+           u.display_name AS user_display_name,
+           u.real_name AS user_real_name,
+           u.name AS user_name,
+           u.avatar_url AS user_avatar_url,
+           u.is_bot AS user_is_bot,
+           tp.last_reply_ts,
+           tp.reply_users
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.user_id
+    LEFT JOIN (
+      SELECT r.thread_ts AS parent_ts,
+             MAX(r.ts) AS last_reply_ts,
+             GROUP_CONCAT(DISTINCT r.user_id) AS reply_users
+      FROM messages r
+      WHERE r.channel_id = @channelId
+        AND r.thread_ts IS NOT NULL
+        AND r.thread_ts != r.ts
+      GROUP BY r.thread_ts
+    ) tp ON tp.parent_ts = m.ts
+    WHERE m.channel_id = @channelId
+      AND (m.thread_ts IS NULL OR m.thread_ts = m.ts)
+    ORDER BY m.ts DESC
+    LIMIT @limit
+  `).all({ channelId, limit });
+}
+
+/**
+ * Get full thread with user metadata.
+ */
+export function getThreadRich(db, channelId, threadTs) {
+  return db.prepare(`
+    SELECT m.ts, m.channel_id, m.user_id, m.text, m.thread_ts, m.reply_count,
+           m.reactions, m.attachments,
+           m.subtype, m.edited_at, m.blocks, m.bot_id, m.bot_profile_name,
+           u.display_name AS user_display_name,
+           u.real_name AS user_real_name,
+           u.name AS user_name,
+           u.avatar_url AS user_avatar_url,
+           u.is_bot AS user_is_bot
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.user_id
+    WHERE m.channel_id = @channelId
+      AND (m.thread_ts = @threadTs OR m.ts = @threadTs)
+    ORDER BY m.ts ASC
+  `).all({ channelId, threadTs });
+}
+
+/**
+ * List all users with full profile data.
+ */
+export function listUsersRich(db) {
+  return db.prepare(`
+    SELECT id, name, real_name, display_name, is_bot,
+           title, email, timezone, status_text, status_emoji, avatar_url
+    FROM users ORDER BY name
+  `).all();
+}
+
+/**
+ * List channels with message counts and latest activity, sorted by recency.
+ */
+export function listChannelsRich(db) {
+  return db.prepare(`
+    SELECT c.id, c.name, c.is_private, c.topic, c.purpose,
+           COUNT(m.ts) AS message_count,
+           MAX(m.ts) AS latest_message_ts
+    FROM channels c
+    LEFT JOIN messages m ON m.channel_id = c.id
+    GROUP BY c.id
+    ORDER BY latest_message_ts DESC NULLS LAST
+  `).all();
+}
+
+/**
+ * Get pins for a channel, joined with message text and user.
+ */
+export function getPinsForChannel(db, channelId) {
+  return db.prepare(`
+    SELECT p.message_ts, p.pinned_by, p.pinned_at,
+           m.text, m.user_id,
+           u.display_name AS user_display_name,
+           u.name AS user_name
+    FROM pins p
+    LEFT JOIN messages m ON m.channel_id = p.channel_id AND m.ts = p.message_ts
+    LEFT JOIN users u ON u.id = m.user_id
+    WHERE p.channel_id = @channelId
+    ORDER BY p.pinned_at DESC
+  `).all({ channelId });
+}
+
+/**
+ * Get bookmarks for a channel with creator info.
+ */
+export function getBookmarksForChannel(db, channelId) {
+  return db.prepare(`
+    SELECT b.id, b.title, b.type, b.link, b.emoji,
+           b.created_by, b.created_at,
+           u.display_name AS creator_display_name,
+           u.name AS creator_name
+    FROM bookmarks b
+    LEFT JOIN users u ON u.id = b.created_by
+    WHERE b.channel_id = @channelId
+    ORDER BY b.created_at DESC
+  `).all({ channelId });
+}
+
+/**
+ * Get team/workspace info.
+ */
+export function getTeamInfo(db) {
+  return db.prepare('SELECT * FROM team LIMIT 1').get() ?? null;
+}
+
+/**
+ * Resolve a channel query (name or ID) to a channel ID.
+ * Tries exact ID match first, then case-insensitive name match.
+ * Falls back to the raw query value if no match is found.
+ */
+export function resolveChannelId(db, query) {
+  if (!query) return undefined;
+  const clean = query.replace(/^#/, '');
+  const byId = db.prepare('SELECT id FROM channels WHERE id = ?').get(clean);
+  if (byId) return byId.id;
+  const byName = db.prepare('SELECT id FROM channels WHERE LOWER(name) = LOWER(?)').get(clean);
+  return byName?.id ?? clean;
+}
+
+/**
+ * Resolve a user query (ID, name, display_name, or real_name) to a user ID.
+ * Falls back to the raw query value if no match is found.
+ */
+export function resolveUserId(db, query) {
+  if (!query) return undefined;
+  const byId = db.prepare('SELECT id FROM users WHERE id = ?').get(query);
+  if (byId) return byId.id;
+  const byName = db.prepare(
+    'SELECT id FROM users WHERE LOWER(name) = LOWER(?) OR LOWER(display_name) = LOWER(?) OR LOWER(real_name) = LOWER(?)'
+  ).get(query, query, query);
+  return byName?.id ?? query;
+}
+
+/**
+ * List all users (basic fields).
+ */
+export function listUsers(db) {
+  return db.prepare(
+    'SELECT id, name, real_name, display_name, is_bot FROM users ORDER BY name'
+  ).all();
+}
+
+/**
+ * Get a workspace-wide summary with aggregate statistics.
+ * Includes per-channel activity, daily message volume, and bot/human breakdown.
+ */
+export function getWorkspaceSummary(db) {
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) AS total_messages,
+      COUNT(DISTINCT channel_id) AS active_channels,
+      COUNT(DISTINCT user_id) AS active_users,
+      COUNT(DISTINCT CASE WHEN thread_ts IS NULL OR thread_ts = ts THEN ts END) AS total_threads
+    FROM messages
+  `).get();
+
+  const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
+  const channelCount = db.prepare('SELECT COUNT(*) AS count FROM channels').get().count;
+  const botCount = db.prepare('SELECT COUNT(*) AS count FROM users WHERE is_bot = 1').get().count;
+
+  const channelActivity = db.prepare(`
+    SELECT c.id, c.name, c.topic, c.purpose,
+           COUNT(m.ts) AS message_count,
+           COUNT(DISTINCT m.user_id) AS unique_posters,
+           MAX(m.ts) AS latest_message_ts
+    FROM channels c
+    LEFT JOIN messages m ON m.channel_id = c.id
+    GROUP BY c.id
+    ORDER BY message_count DESC
+  `).all();
+
+  // Messages per day over the last 30 days
+  const cutoff30d = String((Date.now() / 1000) - (30 * 86400));
+  const dailyActivity = db.prepare(`
+    SELECT
+      date(CAST(ts AS REAL), 'unixepoch') AS day,
+      COUNT(*) AS count
+    FROM messages
+    WHERE ts > @cutoff
+    GROUP BY day
+    ORDER BY day ASC
+  `).all({ cutoff: cutoff30d });
+
+  return {
+    total_messages: totals.total_messages,
+    total_channels: channelCount,
+    total_users: userCount,
+    total_bots: botCount,
+    total_humans: userCount - botCount,
+    active_channels: totals.active_channels,
+    active_users: totals.active_users,
+    total_threads: totals.total_threads,
+    channels: channelActivity,
+    daily_activity: dailyActivity,
+  };
+}
+
+/**
+ * Extract URL unfurls from message attachments in a channel.
+ * Returns structured unfurl data: url, title, description, image, service.
+ */
+export function getUnfurls(db, channelId, { limit = 50 } = {}) {
+  const rows = db.prepare(`
+    SELECT m.ts, m.channel_id, m.user_id, m.text, m.attachments,
+           u.display_name AS user_display_name,
+           u.name AS user_name,
+           c.name AS channel_name
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.user_id
+    LEFT JOIN channels c ON c.id = m.channel_id
+    WHERE m.channel_id = @channelId
+      AND m.attachments IS NOT NULL
+      AND m.attachments != '[]'
+    ORDER BY m.ts DESC
+    LIMIT @limit
+  `).all({ channelId, limit });
+
+  const unfurls = [];
+  for (const row of rows) {
+    try {
+      const attachments = JSON.parse(row.attachments);
+      for (const att of attachments) {
+        if (att.from_url || att.original_url) {
+          unfurls.push({
+            message_ts: row.ts,
+            channel_name: row.channel_name,
+            user: row.user_display_name || row.user_name,
+            url: att.from_url || att.original_url,
+            title: att.title || null,
+            description: att.text || att.fallback || null,
+            service_name: att.service_name || null,
+            service_icon: att.service_icon || null,
+            image_url: att.image_url || att.thumb_url || null,
+            color: att.color || null,
+          });
+        }
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  return unfurls;
+}
+
+/**
+ * Get an activity digest for a channel over a time window.
+ * Returns message counts, unique users, threads started, top posters,
+ * and messages bucketed by hour.
+ */
+export function getChannelDigest(db, channelId, { hours = 24 } = {}) {
+  const cutoffTs = String((Date.now() / 1000) - (hours * 3600));
+
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) AS total_messages,
+      COUNT(DISTINCT user_id) AS unique_users,
+      COUNT(DISTINCT CASE WHEN thread_ts IS NULL OR thread_ts = ts THEN ts END) AS threads_started
+    FROM messages
+    WHERE channel_id = @channelId AND ts > @cutoffTs
+  `).get({ channelId, cutoffTs });
+
+  const topPosters = db.prepare(`
+    SELECT m.user_id,
+           COALESCE(u.display_name, u.real_name, u.name, m.user_id) AS user_name,
+           COUNT(*) AS message_count
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.user_id
+    WHERE m.channel_id = @channelId AND m.ts > @cutoffTs
+    GROUP BY m.user_id
+    ORDER BY message_count DESC
+    LIMIT 10
+  `).all({ channelId, cutoffTs });
+
+  const messagesByHour = db.prepare(`
+    SELECT
+      CAST((CAST(ts AS REAL) - CAST(@cutoffTs AS REAL)) / 3600 AS INTEGER) AS hour_bucket,
+      COUNT(*) AS count
+    FROM messages
+    WHERE channel_id = @channelId AND ts > @cutoffTs
+    GROUP BY hour_bucket
+    ORDER BY hour_bucket ASC
+  `).all({ channelId, cutoffTs });
+
+  return {
+    channel_id: channelId,
+    hours,
+    ...totals,
+    top_posters: topPosters,
+    messages_by_hour: messagesByHour,
+  };
 }

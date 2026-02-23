@@ -1,6 +1,10 @@
 import {
   getDb, searchMessages, getContext, getThread,
-  getRecent, getStats, listChannels, getMessagesByUser,
+  getRecent, getStats, listChannels, listUsers, getMessagesByUser,
+  getRecentRich, getThreadRich, listUsersRich, listChannelsRich,
+  getPinsForChannel, getBookmarksForChannel, getTeamInfo,
+  getChannelDigest, getWorkspaceSummary, getUnfurls,
+  resolveChannelId, resolveUserId,
 } from '../storage/db.js';
 
 /**
@@ -111,9 +115,7 @@ export class SlackAgent {
 
   /** List all users in the database. */
   users() {
-    return this.db.prepare(
-      'SELECT id, name, real_name, display_name, is_bot FROM users ORDER BY name'
-    ).all();
+    return listUsers(this.db);
   }
 
   // ── Compound queries (agent-friendly) ───────────────────────
@@ -172,27 +174,71 @@ export class SlackAgent {
     };
   }
 
+  // ── Rich queries (for frontend) ─────────────────────────────
+
+  /** Recent messages with avatars, reactions, attachments. */
+  recentRich(channel, limit = 100) {
+    const channelId = this._resolveChannel(channel);
+    return getRecentRich(this.db, channelId, limit);
+  }
+
+  /** Full thread with avatars, reactions, attachments. */
+  threadRich(channel, threadTs) {
+    const channelId = this._resolveChannel(channel);
+    return getThreadRich(this.db, channelId, threadTs);
+  }
+
+  /** All users with full profile data. */
+  usersRich() {
+    return listUsersRich(this.db);
+  }
+
+  /** Channels sorted by latest activity with message counts. */
+  channelsRich() {
+    return listChannelsRich(this.db);
+  }
+
+  /** Pins for a channel with message text and user. */
+  pinsForChannel(channel) {
+    const channelId = this._resolveChannel(channel);
+    return getPinsForChannel(this.db, channelId);
+  }
+
+  /** Bookmarks for a channel with creator info. */
+  bookmarksForChannel(channel) {
+    const channelId = this._resolveChannel(channel);
+    return getBookmarksForChannel(this.db, channelId);
+  }
+
+  /** Team/workspace info. */
+  teamInfo() {
+    return getTeamInfo(this.db);
+  }
+
+  /** Activity digest for a channel over a time window. */
+  digest(channel, opts = {}) {
+    const channelId = this._resolveChannel(channel);
+    return getChannelDigest(this.db, channelId, { hours: opts.hours });
+  }
+
+  /** Workspace-wide summary with aggregate stats and per-channel activity. */
+  workspaceSummary() {
+    return getWorkspaceSummary(this.db);
+  }
+
+  /** URL unfurls from message attachments in a channel. */
+  unfurls(channel, opts = {}) {
+    const channelId = this._resolveChannel(channel);
+    return getUnfurls(this.db, channelId, { limit: opts.limit });
+  }
+
   // ── Private helpers ─────────────────────────────────────────
 
   _resolveChannel(query) {
-    if (!query) return undefined;
-    // Strip leading # if present
-    const clean = query.replace(/^#/, '');
-    // Try by ID first
-    const byId = this.db.prepare('SELECT id FROM channels WHERE id = ?').get(clean);
-    if (byId) return byId.id;
-    // Then by name (case-insensitive)
-    const byName = this.db.prepare('SELECT id FROM channels WHERE LOWER(name) = LOWER(?)').get(clean);
-    return byName?.id ?? clean; // fall back to raw value
+    return resolveChannelId(this.db, query);
   }
 
   _resolveUser(query) {
-    if (!query) return undefined;
-    const byId = this.db.prepare('SELECT id FROM users WHERE id = ?').get(query);
-    if (byId) return byId.id;
-    const byName = this.db.prepare(
-      'SELECT id FROM users WHERE LOWER(name) = LOWER(?) OR LOWER(display_name) = LOWER(?) OR LOWER(real_name) = LOWER(?)'
-    ).get(query, query, query);
-    return byName?.id ?? query;
+    return resolveUserId(this.db, query);
   }
 }

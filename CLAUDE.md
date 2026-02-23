@@ -10,11 +10,11 @@ user token, and session token.
 
 ## Commands
 
-- `npm start` — run main entry point
-- `node bin/cli.js serve` — import history, start listener, and serve query API (all-in-one)
-- `node bin/cli.js import` — bulk-import historical messages only
-- `node bin/cli.js listen` — start Slack listener only (Socket Mode or polling)
-- `npx github:LaymanAI/linter .` — lint this CLAUDE.md file
+- `npm start` — SHOULD be used to run the main entry point
+- `node bin/cli.js serve` — SHOULD be used for all-in-one: serve frontend + API, start listener, and import history
+- `node bin/cli.js import` — MAY be used to bulk-import historical messages only
+- `node bin/cli.js listen` — MAY be used to start the Slack listener only (Socket Mode or polling)
+- `npx claude-md-lint@1 .` — SHOULD be used to lint this CLAUDE.md file
 
 ## Architecture
 
@@ -39,13 +39,13 @@ src/storage/db.js       SQLite layer — schema, FTS5, upsert/query helpers
 - Database access MUST go through `src/storage/db.js` helpers. MUST NOT write raw SQL outside that file; instead, add new helpers to `src/storage/db.js` and import them
 - Environment variables SHOULD be loaded via `dotenv/config` in the CLI entry point only
 
-## Authentication Modes
+## Auth Configuration
 
 Auth mode is auto-detected from environment variables (priority: bot > user > session).
 
 **Bot mode** — full-featured, requires a Slack app installed by an admin:
 - `SLACK_BOT_TOKEN` — Bot OAuth token (xoxb-)
-- `SLACK_APP_TOKEN` — App-level token with `connections:write` scope (xapp-)
+- `SLACK_APP_TOKEN` — MUST have `connections:write` scope (xapp-)
 - `SLACK_SIGNING_SECRET` — Signing secret for request verification
 
 **User token mode** — no admin approval needed on most workspaces:
@@ -56,7 +56,7 @@ Auth mode is auto-detected from environment variables (priority: bot > user > se
 - `SLACK_COOKIE_D` — Session cookie `d` value (xoxd-)
 
 Additional shared variable:
-- `DATABASE_PATH` — SQLite database file path (default: `slack-agent.db` in working directory)
+- `DATABASE_PATH` — SQLite database file path (defaults to slack-agent.db in cwd if unset)
 
 Credentials MUST NOT be committed. Use a `.env` file locally (already in `.gitignore`).
 
@@ -78,4 +78,4 @@ Runs on port 3141 (configurable via `-p` flag). Key endpoints:
 - `POST /search` — full-text search with filters
 - `GET /recent/:channel` — recent channel messages
 - `GET /thread/:channel/:threadTs` — full thread
-- `GET /health` — health check
+- `GET /health` — SHOULD be used for health checks

@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npx claude-md-lint@1 . --fail-under 80
+      - run: npx claude-md-lint@1 . --verbose --fail-under 95
       - name: Upload SARIF (PR only)
         if: always() && github.event_name == 'pull_request'
         run: npx claude-md-lint@1 . --sarif > results.sarif
