@@ -134,6 +134,14 @@ html, body {
   opacity: 0.7;
 }
 
+.dm-sidebar-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
 .ch-name {
   overflow: hidden;
   text-overflow: ellipsis;

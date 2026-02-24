@@ -275,6 +275,10 @@ function migrate(db) {
     ['users', 'status_text',  'TEXT DEFAULT \'\''],
     ['users', 'status_emoji', 'TEXT DEFAULT \'\''],
     ['users', 'avatar_url',   'TEXT DEFAULT \'\''],
+    // Channel DM tracking columns
+    ['channels', 'is_im',           'INTEGER DEFAULT 0'],
+    ['channels', 'is_mpim',         'INTEGER DEFAULT 0'],
+    ['channels', 'dm_user_id',      'TEXT'],
     // Message enrichment columns
     ['messages', 'subtype',          'TEXT'],
     ['messages', 'edited_at',        'TEXT'],
@@ -289,26 +293,58 @@ function migrate(db) {
       // Column already exists — ignore
     }
   }
+
+  // ── Backfill DM flags from channel naming patterns ──────────
+  // IMs have D-prefixed IDs and either no name or name == id
+  // MPIMs have mpdm- prefixed names
+  try {
+    db.exec(`
+      UPDATE channels SET is_im = 1
+      WHERE id LIKE 'D%' AND (name IS NULL OR name = id) AND is_im = 0;
+
+      UPDATE channels SET is_mpim = 1
+      WHERE name LIKE 'mpdm-%' AND is_mpim = 0;
+    `);
+    // For IMs without a dm_user_id, pick the most active poster in the DM
+    // (will be properly set to the correct partner on next import from Slack)
+    db.exec(`
+      UPDATE channels SET dm_user_id = (
+        SELECT user_id FROM messages
+        WHERE channel_id = channels.id AND user_id IS NOT NULL
+        GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 1
+      ) WHERE is_im = 1 AND dm_user_id IS NULL;
+    `);
+  } catch {
+    // Backfill is best-effort — ignore errors
+  }
 }
 
 // ── Upsert helpers ──────────────────────────────────────────────
 
 export function upsertChannel(db, ch) {
   db.prepare(`
-    INSERT INTO channels (id, name, is_private, topic, purpose, updated_at)
-    VALUES (@id, @name, @is_private, @topic, @purpose, datetime('now'))
+    INSERT INTO channels (id, name, is_private, topic, purpose,
+                          is_im, is_mpim, dm_user_id, updated_at)
+    VALUES (@id, @name, @is_private, @topic, @purpose,
+            @is_im, @is_mpim, @dm_user_id, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       is_private = excluded.is_private,
       topic = excluded.topic,
       purpose = excluded.purpose,
+      is_im = excluded.is_im,
+      is_mpim = excluded.is_mpim,
+      dm_user_id = excluded.dm_user_id,
       updated_at = datetime('now')
   `).run({
     id: ch.id,
-    name: ch.name ?? ch.id,
+    name: ch.name ?? null,
     is_private: ch.is_private ? 1 : 0,
     topic: ch.topic?.value ?? '',
     purpose: ch.purpose?.value ?? '',
+    is_im: ch.is_im ? 1 : 0,
+    is_mpim: ch.is_mpim ? 1 : 0,
+    dm_user_id: ch.user ?? null,
   });
 }
 
@@ -494,7 +530,7 @@ export function getStats(db) {
  * List all stored channels.
  */
 export function listChannels(db) {
-  return db.prepare('SELECT id, name, is_private, topic, purpose FROM channels ORDER BY name').all();
+  return db.prepare('SELECT id, name, is_private, topic, purpose, is_im, is_mpim, dm_user_id FROM channels ORDER BY name').all();
 }
 
 /**
@@ -795,10 +831,16 @@ export function listUsersRich(db) {
 export function listChannelsRich(db) {
   return db.prepare(`
     SELECT c.id, c.name, c.is_private, c.topic, c.purpose,
+           c.is_im, c.is_mpim, c.dm_user_id,
+           dm_u.display_name AS dm_user_display_name,
+           dm_u.real_name    AS dm_user_real_name,
+           dm_u.name         AS dm_user_name,
+           dm_u.avatar_url   AS dm_user_avatar_url,
            COUNT(m.ts) AS message_count,
            MAX(m.ts) AS latest_message_ts
     FROM channels c
     LEFT JOIN messages m ON m.channel_id = c.id
+    LEFT JOIN users dm_u ON dm_u.id = c.dm_user_id
     GROUP BY c.id
     ORDER BY latest_message_ts DESC NULLS LAST
   `).all();

@@ -74,8 +74,11 @@ function renderTeam() {
 
 // ── Render sidebar ─────────────────────────────────────
 function renderSidebar() {
-  const regularChannels = state.channels.filter(c => c.name && !c.name.startsWith('mpdm-'));
-  const dmChannels = state.channels.filter(c => !c.name || c.name.startsWith('mpdm-'));
+  const regularChannels = state.channels.filter(c => !c.is_im && !c.is_mpim);
+  // DMs sorted by latest activity (most recent first)
+  const dmChannels = state.channels
+    .filter(c => c.is_im || c.is_mpim)
+    .sort((a, b) => (b.latest_message_ts || '0').localeCompare(a.latest_message_ts || '0'));
 
   $channels.innerHTML = regularChannels.map(ch => {
     const icon = ch.is_private ? '&#128274;' : '#';
@@ -83,17 +86,20 @@ function renderSidebar() {
     return `
       <li data-id="${esc(ch.id)}" title="${esc(ch.topic || ch.purpose || '')}">
         <span class="ch-icon">${icon}</span>
-        <span class="ch-name">${esc(ch.name)}</span>
+        <span class="ch-name">${esc(ch.name || ch.id)}</span>
         ${count ? `<span class="unread-badge">${fmtCount(count)}</span>` : ''}
       </li>`;
   }).join('');
 
   if (dmChannels.length) {
     $dms.innerHTML = dmChannels.map(ch => {
-      const label = ch.name ? ch.name.replace(/^mpdm-/, '').replace(/-+/g, ', ').replace(/,\s*$/, '') : ch.id;
+      const label = dmDisplayName(ch);
+      const avatar = ch.dm_user_avatar_url || '';
       return `
         <li data-id="${esc(ch.id)}">
-          <span class="ch-icon">&#128172;</span>
+          ${avatar
+            ? `<img class="dm-sidebar-avatar" src="${esc(avatar)}" alt="" loading="lazy">`
+            : `<span class="ch-icon">&#128172;</span>`}
           <span class="ch-name">${esc(label)}</span>
         </li>`;
     }).join('');
@@ -104,6 +110,33 @@ function renderSidebar() {
   // Click handlers
   $channels.addEventListener('click', onChannelClick);
   $dms.addEventListener('click', onChannelClick);
+}
+
+/**
+ * Get a human-readable display name for a DM channel.
+ * - 1:1 IMs: use the DM partner's display name (joined from the server)
+ * - Group DMs (mpim): parse participant names from the mpdm- channel name,
+ *   or resolve member usernames to display names
+ */
+function dmDisplayName(ch) {
+  // 1:1 IM — use the joined DM user name from the server
+  if (ch.is_im) {
+    return ch.dm_user_display_name || ch.dm_user_real_name || ch.dm_user_name || ch.dm_user_id || ch.id;
+  }
+  // Group DM (mpim) — parse mpdm-user1--user2--user3-N name
+  if (ch.is_mpim && ch.name) {
+    const raw = ch.name.replace(/^mpdm-/, '').replace(/-\d+$/, '');
+    const usernames = raw.split('--').filter(Boolean);
+    // Try to resolve each username to a display name from state.users
+    const resolved = usernames.map(uname => {
+      const u = Object.values(state.users).find(
+        u => u.name === uname || u.display_name === uname
+      );
+      return u?.display_name || u?.real_name || uname;
+    });
+    return resolved.join(', ');
+  }
+  return ch.name || ch.id;
 }
 
 function onChannelClick(e) {
@@ -123,8 +156,9 @@ async function selectChannel(channelId) {
   state.currentChannel = ch;
 
   // Update header
-  const name = ch?.name || ch?.id || '?';
-  const prefix = ch?.is_private ? '&#128274; ' : '# ';
+  const isDm = ch?.is_im || ch?.is_mpim;
+  const name = isDm ? dmDisplayName(ch) : (ch?.name || ch?.id || '?');
+  const prefix = isDm ? '&#128172; ' : ch?.is_private ? '&#128274; ' : '# ';
   $('#channel-title').innerHTML = `${prefix}${esc(name)}`;
   $('#channel-topic').textContent = ch?.topic || '';
   $('#channel-stats').textContent = ch?.message_count ? `${fmtCount(ch.message_count)} messages` : '';
